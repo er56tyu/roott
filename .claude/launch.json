@@ -1,0 +1,10 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "c2-dashboard",
+      "url": "https://vexr-lab-c2-academic-production.up.railway.app",
+      "port": 443
+    }
+  ]
+}
