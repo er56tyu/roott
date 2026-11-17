@@ -1,1 +1,13 @@
+# Runtime data
 vexr_lab.db
+vexr_lab.db-wal
+vexr_lab.db-shm
+artifacts/
+
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*.idsig
+
+# Local editor/agent scratch
+.claude/

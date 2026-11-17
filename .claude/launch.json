@@ -2,9 +2,10 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "c2-dashboard",
-      "url": "https://vexr-lab-c2-academic-production.up.railway.app",
-      "port": 443
+      "name": "vexr-c2",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "uvicorn", "server:app", "--host", "127.0.0.1", "--port", "8123"],
+      "port": 8123
     }
   ]
 }

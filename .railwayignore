@@ -1,0 +1,18 @@
+# The implant binaries and analysis artifacts live beside the server but are not
+# part of the runtime image. Uploading them made `railway up` take minutes and
+# time out against the API.
+*.apk
+*.apk.idsig
+*.jks
+*.jpg
+*.png
+*.db
+*.db-wal
+*.db-shm
+artifacts/
+tools/
+analysis/
+.claude/
+__pycache__/
+*.pyc
+.git/
