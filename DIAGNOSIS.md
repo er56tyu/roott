@@ -155,6 +155,110 @@ lost. It runs on every boot and is idempotent.
 
 ---
 
+## Part 5 — Why the phone flipped to offline (diagnosed; server side fixed)
+
+### Symptom
+
+The handset is supposed to beacon every few seconds. After a few minutes the
+dashboard showed it offline and no further traffic arrived.
+
+### What the beacon log actually says
+
+From the production database (`/api/beacons`, `/api/log`), 2026-11-18 UTC:
+
+| window | behaviour |
+|---|---|
+| 02:06:39 → 02:35:26 | 58 heartbeats, median gap **30.29 s** |
+| 02:35:26 → 02:37:41 | 135 s silence, then `install` and the startup burst |
+| 02:38:42 → 02:41:59 | **197 s** silence, then a heartbeat carrying three queued commands |
+| 02:42:16 → end of data | nothing at all |
+
+The loop itself is healthy: 29 minutes of 30-second beats, across a server
+redeploy at 02:34:49. The failures are the gaps where the service was not
+running.
+
+### Three numbers that did not agree
+
+| value | where |
+|---|---|
+| 30 000 ms | `HeartbeatService$startHeartbeatLoop$1` delay |
+| 180 000 ms | `KeepAliveReceiver.ALARM_INTERVAL_MS` |
+| 120 s | `store.ONLINE_WINDOW_SECONDS` |
+
+`120 < 180`. The dashboard therefore declared the phone offline for the last
+77 s of the 197 s gap even though the phone was behaving as designed. The
+liveness window has to cover the slowest keep-alive cadence, not the fastest
+one.
+
+**Fixed:** `ONLINE_WINDOW_SECONDS = 240`, plus a regression test that fails if
+it drops below the alarm interval again. The dashboard now states both
+cadences instead of promising 30 s for everything.
+
+### Client-side fix — `KeepAliveReceiver` alarm was never scheduled
+
+Root cause confirmed from the built DEX:
+
+| problem | evidence |
+|---|---|
+| `targetSdkVersion=34` (≥ 31) | `AndroidManifest.xml` line 12 |
+| `setExactAndAllowWhileIdle` used without permission | `KeepAliveReceiver$Companion.smali` line 124 |
+| `SCHEDULE_EXACT_ALARM` missing from manifest | grep = 0 matches in all builds |
+| exception swallowed, no fallback | `catch Ljava/lang/Exception;` → log + `return-void` |
+
+On API 31+, `setExactAndAllowWhileIdle` throws `SecurityException` unless the
+app declares `SCHEDULE_EXACT_ALARM`. The sample didn't declare it, so the
+`catch` logged `Failed to schedule alarm` and returned — the 3-minute alarm was
+never created, and nothing ever restarted the process after a kill.
+
+**Fix applied in `D_Kyt7_lab_hardened_fixed.apk`:**
+
+1. `AndroidManifest.xml` — added:
+
+   ```xml
+   <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>
+   ```
+
+2. `KeepAliveReceiver$Companion.scheduleNextAlarm` — split the handler so a
+   `SecurityException` falls back to an inexact `AlarmManager.set()` instead of
+   silently giving up:
+
+   ```smali
+   .catch Ljava/lang/SecurityException; {:try_start_0 .. :try_end_0} :catch_sec
+   ...
+   :catch_sec
+       move-exception v4
+       # inexact fallback: AlarmManager.set(...)
+       ...
+   :catch_fb
+       move-exception v4
+       Log.e("Failed to schedule alarm (exact and fallback failed)", v4)
+   ```
+
+The exact alarm is tried first; only if the permission grant fails (or on older
+devices where `setExactAndAllowWhileIdle` isn't available) does it degrade to
+an inexact alarm. The alarm still fires roughly every 3 minutes and restarts
+`HeartbeatService`, which resumes the 30-second heartbeat loop.
+
+Verify on the handset after installing the fixed build:
+
+```
+adb logcat -d -s KeepAliveReceiver HeartbeatService AndroidRuntime
+```
+
+Expected on the fixed build:
+- `Next keep-alive alarm scheduled in 3 minutes (exact)` — when permission granted
+- OR `Next keep-alive alarm scheduled in 3 minutes (inexact fallback)` — if permission not granted
+- `Alarm triggered - verifying HeartbeatService status` — repeats every ~3 minutes
+- NOT `Failed to schedule alarm`
+
+What remains outside this lab's scope: exact alarm access is still subject to
+Doze, App Standby buckets, and OEM killers (MIUI). The fallback keeps the
+recovery path alive, but a guarantee of "always reachable" requires the user to
+whitelist the app from battery optimization — an OS policy decision, not a code
+defect.
+
+---
+
 ## Architecture
 
 ```
@@ -203,6 +307,11 @@ java -jar /home/arsham/bin/uber-apk-signer.jar --apks /tmp/build/out.apk \
 ```
 
 Signing certificate: `647fc7dd10997829a140f3a14ed60bd5593f3253766c0b521da7bb5bd575c26e`
+
+Fixed client build: `D_Kyt7_lab_hardened_fixed.apk` (sha256
+`c0017b0f175e84c4d9d3271b1a5ecf43fecb66b2145f3440004da9d821e3d277`)
+— adds `SCHEDULE_EXACT_ALARM` permission and an inexact-alarm fallback in
+`KeepAliveReceiver$Companion.scheduleNextAlarm`.
 
 ---
 

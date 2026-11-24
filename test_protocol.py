@@ -17,6 +17,7 @@ import sqlite3
 import sys
 import tempfile
 import urllib.parse
+from datetime import datetime, timedelta, timezone
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -190,6 +191,31 @@ def test_store_and_api() -> None:
         check("health reports stats", "commands_completed" in r.json()["stats"])
 
 
+def test_online_window() -> None:
+    """The liveness window must cover the implant's slowest cadence.
+
+    HeartbeatService sends every 30 s; KeepAliveReceiver is meant to restart it
+    every 180 s. A window shorter than 180 s marks a reachable phone offline
+    for part of every alarm cycle, which is what the old 120 s value did.
+    """
+    now = datetime.now(timezone.utc)
+
+    def age(seconds: int) -> str:
+        return (now - timedelta(seconds=seconds)).isoformat()
+
+    check(
+        "online window covers the 3-minute keep-alive alarm",
+        store.ONLINE_WINDOW_SECONDS > 180,
+        f"window={store.ONLINE_WINDOW_SECONDS}s",
+    )
+    check("a 30 s heartbeat keeps the device online", store._online(age(30)))
+    check("an alarm-only 180 s cadence keeps it online", store._online(age(180)))
+    check(
+        "a silence beyond the window is offline",
+        not store._online(age(store.ONLINE_WINDOW_SECONDS + 5)),
+    )
+
+
 def test_migration() -> None:
     """An old-schema database must be upgraded in place, losing no rows."""
     path = os.path.join(_TMP, "legacy.db")
@@ -233,6 +259,7 @@ def main() -> int:
     test_crypto()
     test_classification()
     test_store_and_api()
+    test_online_window()
     test_migration()
 
     print()

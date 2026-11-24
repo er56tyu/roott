@@ -472,7 +472,17 @@ def pending_for(device_key: str) -> list[dict[str, Any]]:
 # Read models for the API
 # ---------------------------------------------------------------------------
 
-ONLINE_WINDOW_SECONDS = 120
+# The implant has exactly two liveness cadences, both hardcoded in the APK:
+#
+#   HeartbeatService         one beacon every 30 s, while its process lives
+#   KeepAliveReceiver alarm  180 s (ALARM_INTERVAL_MS), the intended fallback
+#
+# "Online" must cover the slower of the two, otherwise a phone that is still
+# reachable is painted offline between alarm firings. The old value of 120 s was
+# shorter than the alarm period, so every alarm-only cycle spent a minute or
+# more showing "offline" even in the best case. 240 s leaves 60 s of margin for
+# scheduling jitter without hiding a genuinely absent device for long.
+ONLINE_WINDOW_SECONDS = 240
 
 
 def _online(last_seen: Optional[str]) -> bool:

