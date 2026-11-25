@@ -350,10 +350,27 @@ Fixed client build: `D_Kyt7_lab_hardened_fixed.apk` (sha256
 verify-unsafe catch block described above and crashes on launch.
 
 Current client build: `WhiteAesther.apk` (sha256
-`248a5c73caf496195f9fea5c936ea51f6f30ade8a5dfb955ddf13bad0662cad6`)
-— same package `com.VexR.app`, versionCode 2, signed with the same key, so it
-installs over any earlier build. Adds the alarm fix in its corrected form and
-renames the app to `WhiteAesther` with a transparent circular icon.
+`5d1f3ca67dbfb6e7fafd0d7d095da8305ebebdd5c108011ab749cc1f02b362ba`)
+— same package `com.VexR.app`, versionCode 3 / versionName 3.4.1, signed with
+the same key, so it installs over any earlier build. Adds the alarm fix in its
+corrected form, renames the app to `WhiteAesther` with a transparent circular
+icon, and replaces the WebView registration page with a local app screen.
+
+### Local frontend
+
+`vpn_frontend/index.html` is the source of the UI that ships as
+`assets/index.html`. `setupWebView` hard-sets
+
+```smali
+const-string v1, "file:///android_asset/index.html"
+```
+
+right after the `:goto_0` merge point and before `loadUrl`, so the encrypted
+`web_key` URL from the config can never override it. The page is one
+self-contained file: Persian RTL, dark/aqua theme, bundled Vazirmatn
+(`woff2` embedded as base64) so it renders identically offline. `a/y80`
+already permits `file://`, and `setDomStorageEnabled(true)` was already in
+`setupWebView`, so `localStorage` works for the UI's persisted choices.
 
 ---
 
