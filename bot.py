@@ -403,13 +403,26 @@ class AllowlistMiddleware(BaseMiddleware):
         data: dict[str, Any],
     ) -> Any:
         user = event.from_user
-        if user is not None and user.id in ALLOWED_IDS:
-            return await handler(event, data)
-        log.warning(
-            "blocked user id=%s username=%s",
+        allowed = user is not None and user.id in ALLOWED_IDS
+        log.info(
+            "update from id=%s username=%s allowed=%s",
             getattr(user, "id", "?"),
             getattr(user, "username", "?"),
+            allowed,
         )
+        if allowed:
+            return await handler(event, data)
+
+        # Setup aid: a stranger pressing /start learns their own numeric id,
+        # which is how the operator finds the number for the allowlist.
+        if isinstance(event, Message) and (event.text or "").startswith("/start"):
+            try:
+                await event.answer(
+                    "⛔️ این ربات خصوصی است.\n"
+                    f"آیدی عددی شما: <code>{getattr(user, 'id', '?')}</code>"
+                )
+            except Exception:  # noqa: BLE001 - the gate must never fail
+                log.exception("could not send the deny hint")
         return None
 
 
@@ -588,52 +601,87 @@ async def on_get(message: Message, command: CommandObject, c2: C2Client) -> None
 # ---------------------------------------------------------------------------
 
 
-async def main() -> None:
-    if not BOT_TOKEN:
-        raise SystemExit(
-            "TELEGRAM_BOT_TOKEN تنظیم نشده — .env را از .env.example بساز."
-        )
-    if not ALLOWED_IDS:
-        raise SystemExit(
-            "TELEGRAM_ALLOWED_IDS خالی است. آیدی عددی خودت را از @userinfobot "
-            "بگیر و در .env بگذار؛ وگرنه ربات به هیچ‌کس جواب نمی‌دهد."
-        )
+class BotConfigError(RuntimeError):
+    """A required setting is missing; retrying cannot help."""
 
-    c2 = C2Client(C2_URL)
+
+def make_bot() -> Bot:
     session = AiohttpSession(proxy=TELEGRAM_PROXY or None, timeout=20)
-    bot = Bot(
+    return Bot(
         BOT_TOKEN,
         session=session,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
-    dp["c2"] = c2
 
+
+async def _run_once(base_url: str) -> None:
+    bot = make_bot()
+    c2 = C2Client(base_url)
+    dp["c2"] = c2
     try:
         me = await bot.get_me()
-    except Exception as exc:  # noqa: BLE001 - startup check, message matters more
-        await c2.close()
-        await bot.session.close()
-        raise SystemExit(
-            f"اتصال به تلگرام برقرار نشد ({exc.__class__.__name__}: {exc}).\n"
-            "اگر api.telegram.org در دسترس نیست، TELEGRAM_PROXY را در .env بگذار."
-        ) from exc
-
-    log.info(
-        "connected as @%s · c2=%s · allowed=%d",
-        me.username,
-        C2_URL,
-        len(ALLOWED_IDS),
-    )
-    try:
+        log.info(
+            "connected as @%s (id=%s) · c2=%s · allowed=%s",
+            me.username,
+            me.id,
+            base_url,
+            sorted(ALLOWED_IDS),
+        )
         await bot.delete_webhook(drop_pending_updates=True)
-        await dp.start_polling(bot)
+        # The web service runs this task in its own event loop, so it must not
+        # install signal handlers or close a session it does not own.
+        await dp.start_polling(bot, handle_signals=False, close_bot_session=False)
     finally:
         await c2.close()
-        log.info("stopped")
+        await bot.session.close()
+        log.info("telegram bot stopped")
+
+
+async def serve(base_url: str | None = None, retry: bool = True) -> None:
+    """Poll Telegram until cancelled.
+
+    Called by ``python bot.py`` and by the web service, which runs it as a
+    background task so one Railway deploy carries both the API and the bot.
+    """
+    if not BOT_TOKEN:
+        raise BotConfigError(
+            "TELEGRAM_BOT_TOKEN تنظیم نشده — .env را از .env.example بساز."
+        )
+    if not ALLOWED_IDS:
+        raise BotConfigError(
+            "TELEGRAM_ALLOWED_IDS خالی است. آیدی عددی خودت را از @userinfobot "
+            "بگیر و در .env بگذار؛ وگرنه ربات به هیچ‌کس جواب نمی‌دهد."
+        )
+
+    target = base_url or C2_URL
+    delay = 5
+    while True:
+        try:
+            await _run_once(target)
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - keep the bot alive
+            if not retry:
+                raise
+            log.warning(
+                "telegram bot stopped (%s: %s); retrying in %d s",
+                exc.__class__.__name__,
+                exc,
+                delay,
+            )
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 300)
+
+
+async def main() -> None:
+    await serve()
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
+    except BotConfigError as exc:
+        raise SystemExit(str(exc)) from exc
     except KeyboardInterrupt:
         pass

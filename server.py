@@ -23,7 +23,9 @@ Run:  uvicorn server:app --host 0.0.0.0 --port 8000
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import os
 from typing import Any, Optional
 
@@ -58,6 +60,90 @@ def _startup() -> None:
         f"C2 started · db={store.DB_PATH} artifacts={store.ARTIFACT_DIR} "
         f"persistent={store.DB_PATH.parent != store.BASE_DIR}",
     )
+
+
+# ---------------------------------------------------------------------------
+# Telegram operator bot
+# ---------------------------------------------------------------------------
+# The bot runs inside the API process. A second Railway service is one more
+# thing to misconfigure, while this service already deploys and has a working
+# database. Set TELEGRAM_BOT=0 to turn it off.
+
+_bot_task: Optional[asyncio.Task[None]] = None
+_bot_log_handler: Optional[logging.Handler] = None
+
+
+class _StoreLogHandler(logging.Handler):
+    """Mirror bot log lines into the operator log, so /api/log shows them."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            message = record.getMessage()
+            if record.exc_info:
+                trace = logging.Formatter().formatException(record.exc_info)
+                message += " | " + " ".join(trace.split())
+            store.log(record.levelname.lower(), f"bot: {message}")
+        except Exception:  # noqa: BLE001 - logging must never break the bot
+            pass
+
+
+def _on_bot_done(task: asyncio.Task[None]) -> None:
+    if task.cancelled():
+        store.log("info", "bot: task cancelled")
+        return
+    error = task.exception()
+    if error is None:
+        store.log("info", "bot: task finished")
+    else:
+        store.log("error", f"bot: task failed · {error.__class__.__name__}: {error}")
+
+
+@app.on_event("startup")
+async def _start_telegram_bot() -> None:
+    global _bot_task, _bot_log_handler
+
+    if os.environ.get("TELEGRAM_BOT", "1") == "0":
+        store.log("info", "bot: disabled by TELEGRAM_BOT=0")
+        return
+
+    try:
+        import bot as telegram_bot
+    except Exception as exc:  # noqa: BLE001 - the API must still boot
+        store.log("error", f"bot: import failed · {exc.__class__.__name__}: {exc}")
+        return
+
+    _bot_log_handler = _StoreLogHandler()
+    telegram_bot.log.addHandler(_bot_log_handler)
+
+    # Talk to ourselves over loopback: no public round trip, no TLS, and the
+    # bot reads exactly the database this process serves.
+    port = os.environ.get("PORT", "8000")
+    _bot_task = asyncio.create_task(
+        telegram_bot.serve(base_url=f"http://127.0.0.1:{port}"),
+        name="telegram-bot",
+    )
+    _bot_task.add_done_callback(_on_bot_done)
+
+
+@app.on_event("shutdown")
+async def _stop_telegram_bot() -> None:
+    global _bot_task, _bot_log_handler
+
+    if _bot_task is not None:
+        _bot_task.cancel()
+        try:
+            await _bot_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:  # noqa: BLE001 - already reported by the callback
+            pass
+        _bot_task = None
+
+    if _bot_log_handler is not None:
+        import bot as telegram_bot
+
+        telegram_bot.log.removeHandler(_bot_log_handler)
+        _bot_log_handler = None
 
 
 # ---------------------------------------------------------------------------
