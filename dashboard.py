@@ -474,7 +474,8 @@ function toast(msg){
   setTimeout(()=>t.classList.remove('show'), 2600);
 }
 async function api(path, opts){
-  const r = await fetch(path, opts);
+  const r = await fetch(path, Object.assign({credentials:'same-origin'}, opts));
+  if(r.status === 401){ location.href = '/'; throw new Error('unauthorized'); }
   if(!r.ok) throw new Error((await r.text()).slice(0,200) || r.statusText);
   return r.json();
 }
@@ -709,7 +710,8 @@ async function openArtifact(id){
     if(a && a.kind === 'image'){
       $('#modal-body').innerHTML = `<img src="/api/artifacts/${id}/preview" alt="">`;
     } else {
-      const r = await fetch(`/api/artifacts/${id}/preview`);
+      const r = await fetch(`/api/artifacts/${id}/preview`,
+                             {credentials:'same-origin'});
       const text = await r.text();
       $('#modal-body').innerHTML =
         `<pre>${esc(text.slice(0, 200000))}</pre>` +
