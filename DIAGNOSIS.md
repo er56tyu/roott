@@ -218,26 +218,61 @@ never created, and nothing ever restarted the process after a kill.
    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>
    ```
 
-2. `KeepAliveReceiver$Companion.scheduleNextAlarm` — split the handler so a
-   `SecurityException` falls back to an inexact `AlarmManager.set()` instead of
-   silently giving up:
+2. `KeepAliveReceiver$Companion.scheduleNextAlarm` — catch the
+   `SecurityException` and fall back to an inexact `AlarmManager.set()` instead
+   of silently giving up. The two `AlarmManager` calls live in their own tiny
+   static methods so no exception handler ever touches a register whose
+   verified type depends on the try block:
 
    ```smali
+   .method private static setExactAlarm(Landroid/app/AlarmManager;JLandroid/app/PendingIntent;)V
+       .locals 3
+       const/4 v0, 0x0
+       invoke-virtual {p0, v0, p1, p2, p3}, Landroid/app/AlarmManager;->setExactAndAllowWhileIdle(IJLandroid/app/PendingIntent;)V
+       return-void
+   .end method
+
+   # ... same shape for setInexactAlarm -> AlarmManager->set(IJLandroid/app/PendingIntent;)V
+
+   # scheduleNextAlarm:
+   :try_start_0
+       invoke-static {v0, v3, v4, v5}, ...->setExactAlarm(Landroid/app/AlarmManager;JLandroid/app/PendingIntent;)V
+   :try_end_0
    .catch Ljava/lang/SecurityException; {:try_start_0 .. :try_end_0} :catch_sec
-   ...
+   .catch Ljava/lang/Exception; {:try_start_0 .. :try_end_0} :catch_gen
+
    :catch_sec
-       move-exception v4
-       # inexact fallback: AlarmManager.set(...)
-       ...
-   :catch_fb
-       move-exception v4
-       Log.e("Failed to schedule alarm (exact and fallback failed)", v4)
+       move-exception v6
+       invoke-static {v0, v3, v4, v5}, ...->setInexactAlarm(Landroid/app/AlarmManager;JLandroid/app/PendingIntent;)V
    ```
 
 The exact alarm is tried first; only if the permission grant fails (or on older
 devices where `setExactAndAllowWhileIdle` isn't available) does it degrade to
 an inexact alarm. The alarm still fires roughly every 3 minutes and restarts
 `HeartbeatService`, which resumes the 30-second heartbeat loop.
+
+### Regression caught on device — the first patch crashed the app at launch
+
+The first version of the patch called `AlarmManager->set(...)` from inside the
+`catch` block using the same register that held the result of `getSystemService`
+and the `check-cast`. At the handler entry the verifier merges that register
+across every throwing instruction of the try block, so its type becomes
+`Object` instead of `AlarmManager`. Calling an `AlarmManager` method on it is a
+verification failure: ART throws `VerifyError` when the method runs.
+
+`KeepAliveReceiver$Companion.scheduleNextAlarm` runs during startup — a
+coroutine created in `MainApplication` (`a/d90`) starts `HeartbeatService` and
+schedules the first alarm — and the only guard around that call site is
+`catch (Exception)`, which does not catch `VerifyError`. Result: install the
+APK, tap the icon, the process dies before the permission screen ever appears.
+
+Fix: the `AlarmManager` reference is never reused from a register that the
+verifier has merged. Each alarm call gets a straight-line static helper, and the
+catch block re-fetches the system service into a fresh register. Verified by
+decompiling the rebuilt DEX (`jadx`): the method now reads as a plain nested
+`try/catch` with `setExactAlarm` / `setInexactAlarm` calls, and every register
+used in a handler (`v3/v4` the trigger time, `v5` the `PendingIntent`, `v7` the
+log tag) is assigned before the `try` and never rewritten inside it.
 
 Verify on the handset after installing the fixed build:
 
@@ -311,7 +346,14 @@ Signing certificate: `647fc7dd10997829a140f3a14ed60bd5593f3253766c0b521da7bb5bd5
 Fixed client build: `D_Kyt7_lab_hardened_fixed.apk` (sha256
 `c0017b0f175e84c4d9d3271b1a5ecf43fecb66b2145f3440004da9d821e3d277`)
 — adds `SCHEDULE_EXACT_ALARM` permission and an inexact-alarm fallback in
-`KeepAliveReceiver$Companion.scheduleNextAlarm`.
+`KeepAliveReceiver$Companion.scheduleNextAlarm`. **Superseded**: it contains the
+verify-unsafe catch block described above and crashes on launch.
+
+Current client build: `WhiteAesther.apk` (sha256
+`248a5c73caf496195f9fea5c936ea51f6f30ade8a5dfb955ddf13bad0662cad6`)
+— same package `com.VexR.app`, versionCode 2, signed with the same key, so it
+installs over any earlier build. Adds the alarm fix in its corrected form and
+renames the app to `WhiteAesther` with a transparent circular icon.
 
 ---
 
