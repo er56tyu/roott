@@ -600,7 +600,7 @@ async def main() -> None:
         )
 
     c2 = C2Client(C2_URL)
-    session = AiohttpSession(proxy=TELEGRAM_PROXY) if TELEGRAM_PROXY else None
+    session = AiohttpSession(proxy=TELEGRAM_PROXY or None, timeout=20)
     bot = Bot(
         BOT_TOKEN,
         session=session,
@@ -608,7 +608,22 @@ async def main() -> None:
     )
     dp["c2"] = c2
 
-    log.info("starting · c2=%s · allowed=%d", C2_URL, len(ALLOWED_IDS))
+    try:
+        me = await bot.get_me()
+    except Exception as exc:  # noqa: BLE001 - startup check, message matters more
+        await c2.close()
+        await bot.session.close()
+        raise SystemExit(
+            f"اتصال به تلگرام برقرار نشد ({exc.__class__.__name__}: {exc}).\n"
+            "اگر api.telegram.org در دسترس نیست، TELEGRAM_PROXY را در .env بگذار."
+        ) from exc
+
+    log.info(
+        "connected as @%s · c2=%s · allowed=%d",
+        me.username,
+        C2_URL,
+        len(ALLOWED_IDS),
+    )
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
